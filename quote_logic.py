@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from weasyprint import HTML
@@ -42,7 +42,18 @@ CNPJ_ENDPOINTS = [
     "https://publica.cnpj.ws/cnpj/{cnpj}",
 ]
 
+ADDRESS_KEYWORDS = [
+    "rua", "r.", "avenida", "av.", "estrada", "rodovia", "travessa", "tv.",
+    "alameda", "praça", "praca", "bairro", "cep", "km", "rod.", "br-"
+]
+
+DELIVERY_KEYWORDS = [
+    "endereço entrega", "endereco entrega", "endereço de entrega",
+    "endereco de entrega", "entrega:"
+]
+
 lock = Lock()
+
 
 def d(value: Any) -> Decimal:
     if isinstance(value, Decimal):
@@ -53,10 +64,12 @@ def d(value: Any) -> Decimal:
     text = text.replace("R$", "").replace(".", "").replace(" ", "").replace(",", ".")
     return Decimal(text)
 
+
 def money(value: Decimal) -> str:
     value = value.quantize(TWOPLACES, rounding=ROUND_HALF_UP)
     s = f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {s}"
+
 
 def fmt_decimal(value: Decimal, places: int = 3) -> str:
     q = Decimal("1") if places == 0 else Decimal("1." + ("0" * places))
@@ -64,8 +77,10 @@ def fmt_decimal(value: Decimal, places: int = 3) -> str:
     txt = f"{value:.{places}f}".replace(".", ",")
     return txt
 
+
 def digits_only(text: str) -> str:
     return re.sub(r"\D", "", text or "")
+
 
 def format_cnpj(cnpj: str) -> str:
     digits = digits_only(cnpj)
@@ -73,25 +88,49 @@ def format_cnpj(cnpj: str) -> str:
         return cnpj or "não informado"
     return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
 
+
+def format_cpf(cpf: str) -> str:
+    digits = digits_only(cpf)
+    if len(digits) != 11:
+        return cpf or "não informado"
+    return f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
+
+
+def format_doc(doc: str) -> str:
+    digits = digits_only(doc)
+    if len(digits) == 14:
+        return format_cnpj(doc)
+    if len(digits) == 11:
+        return format_cpf(doc)
+    return doc or "não informado"
+
+
 def format_cep(cep: str) -> str:
     digits = digits_only(cep)
     if len(digits) != 8:
         return cep or ""
     return f"{digits[:5]}-{digits[5:]}"
 
+
 def br_date(dt: date) -> str:
     return dt.strftime("%d/%m/%Y")
 
+
 def sanitize_html(value: str) -> str:
     return html_lib.escape(value or "").replace("\n", "<br>")
+
 
 def extract_cnpj(text: str) -> str:
     match = re.search(r"\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b", text or "")
     return format_cnpj(match.group(0)) if match else "não informado"
 
+
 def normalize_product(raw_name: str, raw_size: str) -> str:
     name = (raw_name or "").strip().lower()
-    size = SIZE_MAP.get((raw_size or "").replace("m", "").strip(), (raw_size or "").replace("m", "").strip().replace(".", ","))
+    size = SIZE_MAP.get(
+        (raw_size or "").replace("m", "").strip(),
+        (raw_size or "").replace("m", "").strip().replace(".", ","),
+    )
     if "tap" in name:
         base = "Tapume"
     elif "telh" in name:
@@ -100,9 +139,140 @@ def normalize_product(raw_name: str, raw_size: str) -> str:
         return raw_name.strip() or "Produto não informado"
     return f"{base} 0,55x{size}m"
 
+
 def join_address(parts: List[str]) -> str:
-    cleaned = [p.strip(" ,-/") for p in parts if p and str(p).strip() and str(p).strip().lower() not in {"s/n", "sn"}]
+    cleaned = [
+        p.strip(" ,-/")
+        for p in parts
+        if p and str(p).strip() and str(p).strip().lower() not in {"s/n", "sn"}
+    ]
     return ", ".join(cleaned) if cleaned else "não informado"
+
+
+def normalize_spaces(text: str) -> str:
+    text = (text or "").replace("\u00a0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\s+\n", "\n", text)
+    return text.strip()
+
+
+def preprocess_text(raw_text: str) -> List[str]:
+    text = normalize_spaces(raw_text)
+    lines = [line.strip(" -\t") for line in text.splitlines()]
+    return [line for line in lines if line.strip()]
+
+
+def strip_known_label(text: str) -> str:
+    t = (text or "").strip()
+
+    patterns = [
+        r"^(nome)\s*:\s*",
+        r"^(cliente)\s*:\s*",
+        r"^(cpf\/cnpj)\s*:\s*",
+        r"^(cpf)\s*:\s*",
+        r"^(cnpj)\s*:\s*",
+        r"^(endereço de entrega)\s*:\s*",
+        r"^(endereco de entrega)\s*:\s*",
+        r"^(endereço entrega)\s*:\s*",
+        r"^(endereco entrega)\s*:\s*",
+        r"^(endereço)\s*:\s*",
+        r"^(endereco)\s*:\s*",
+        r"^(frete)\s*:\s*",
+        r"^(valor negociado)\s*:\s*",
+        r"^(número da cotação)\s*:\s*",
+        r"^(numero da cotação)\s*:\s*",
+        r"^(numero da cotacao)\s*:\s*",
+        r"^(cotação)\s*:\s*",
+        r"^(cotacao)\s*:\s*",
+        r"^(prazo de entrega)\s*:\s*",
+        r"^(observações)\s*:\s*",
+        r"^(observacoes)\s*:\s*",
+    ]
+
+    for pattern in patterns:
+        t = re.sub(pattern, "", t, flags=re.IGNORECASE).strip()
+
+    return t
+
+
+def extract_document_from_text(text: str) -> Tuple[Optional[str], str]:
+    original = (text or "").strip()
+
+    m = re.search(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", original)
+    if m:
+        doc = format_cnpj(m.group(0))
+        cleaned = (original[:m.start()] + " " + original[m.end():]).strip(" -,")
+        return doc, normalize_spaces(cleaned)
+
+    m = re.search(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b", original)
+    if m:
+        doc = format_cpf(m.group(0))
+        cleaned = (original[:m.start()] + " " + original[m.end():]).strip(" -,")
+        return doc, normalize_spaces(cleaned)
+
+    m = re.search(r"(?<!\d)\d{14}(?!\d)", original)
+    if m:
+        doc = format_cnpj(m.group(0))
+        cleaned = (original[:m.start()] + " " + original[m.end():]).strip(" -,")
+        return doc, normalize_spaces(cleaned)
+
+    m = re.search(r"(?<!\d)\d{11}(?!\d)", original)
+    if m:
+        doc = format_cpf(m.group(0))
+        cleaned = (original[:m.start()] + " " + original[m.end():]).strip(" -,")
+        return doc, normalize_spaces(cleaned)
+
+    return None, original
+
+
+def looks_like_address(text: str) -> bool:
+    t = (text or "").lower()
+    return any(keyword in t for keyword in ADDRESS_KEYWORDS)
+
+
+def looks_like_delivery_address(text: str) -> bool:
+    t = (text or "").lower()
+    return any(keyword in t for keyword in DELIVERY_KEYWORDS)
+
+
+def looks_like_product_line(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(re.search(r"\b\d+\s+(tapume|tapumes|telha|telhas)\b", t))
+
+
+def classify_customer_line(text: str) -> Dict[str, str]:
+    raw = (text or "").strip()
+    no_label = strip_known_label(raw)
+
+    found_doc, remainder = extract_document_from_text(no_label)
+
+    result: Dict[str, str] = {}
+
+    if found_doc:
+        result["cliente_doc"] = found_doc
+
+    remainder = remainder.strip(" -,")
+
+    if remainder and not looks_like_address(remainder) and not looks_like_product_line(remainder):
+        remainder = re.sub(r"\s*-\s*(cpf|cnpj)\b.*$", "", remainder, flags=re.IGNORECASE).strip()
+        result["cliente_nome"] = normalize_spaces(remainder)
+
+    return result
+
+
+def classify_address_line(text: str) -> Dict[str, str]:
+    raw = (text or "").strip()
+    lower = raw.lower()
+    value = strip_known_label(raw)
+
+    if looks_like_delivery_address(lower):
+        return {"cliente_endereco_entrega": normalize_spaces(value)}
+
+    if looks_like_address(value):
+        return {"cliente_endereco": normalize_spaces(value)}
+
+    return {}
+
 
 class QuoteBuilder:
     def __init__(self, base_dir: Path):
@@ -160,7 +330,12 @@ class QuoteBuilder:
         numero = endereco_data.get("numero") or ""
         complemento = endereco_data.get("complemento") or ""
         bairro = endereco_data.get("bairro") or ""
-        municipio = endereco_data.get("cidade") or endereco_data.get("municipio") or endereco_data.get("cidade_exterior") or ""
+        municipio = (
+            endereco_data.get("cidade")
+            or endereco_data.get("municipio")
+            or endereco_data.get("cidade_exterior")
+            or ""
+        )
         uf = endereco_data.get("estado") or endereco_data.get("uf") or ""
         cep = endereco_data.get("cep") or ""
 
@@ -186,92 +361,130 @@ class QuoteBuilder:
         }
 
     def parse_text(self, text: str) -> Dict[str, Any]:
-        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-        lower = "\n".join(lines).lower()
+        lines = preprocess_text(text)
+        cnpj_extraido = extract_cnpj(text)
 
-        cnpj = extract_cnpj(text)
-        cliente_nome = "não informado"
-        if lines:
-            first = re.sub(r"\s*-\s*CNPJ.*$", "", lines[0], flags=re.I).strip()
-            if first:
-                cliente_nome = first
+        data: Dict[str, Any] = {
+            "cliente_nome": "",
+            "cliente_doc": "",
+            "cliente_endereco": "",
+            "cliente_endereco_entrega": "não informado",
+            "frete": Decimal("0"),
+            "valor_negociado": None,
+            "prazo_entrega": None,
+            "numero_cotacao": None,
+            "items": [],
+            "observacoes_adicionais": [],
+            "texto_original": text,
+        }
 
-        entrega = "não informado"
-        obs = []
-        frete = Decimal("0")
-        valor_negociado = None
-        prazo_entrega = None
-        numero_cotacao = None
-        items = []
+        item_pattern = re.compile(
+            r"(?P<qtd>\d+)\s+(?P<produto>tapumes?|telhas?)\s+(?P<medida>\d+[.,]?\d*)m?\b",
+            re.I,
+        )
 
-        item_pattern = re.compile(r"(?P<qtd>\d+)\s+(?P<produto>tapumes?|telhas?)\s+(?P<medida>\d+[.,]?\d*)m?\b", re.I)
-        money_pattern = re.compile(r"R\$\s*([\d\.,]+)|([\d]+\,[\d]{2})")
+        for line in lines:
+            line_lower = line.lower()
 
-        for line in lines[1:]:
             m = item_pattern.search(line)
             if m:
                 qtd = int(m.group("qtd"))
                 produto = normalize_product(m.group("produto"), m.group("medida"))
-                items.append({
+                data["items"].append({
                     "produto": produto,
                     "quantidade": qtd,
                 })
                 continue
 
-            if "endereço entrega" in line.lower() or "endereco entrega" in line.lower():
-                entrega = re.split(r":", line, maxsplit=1)[-1].strip() or "não informado"
+            address_info = classify_address_line(line)
+            if address_info:
+                for k, v in address_info.items():
+                    if v:
+                        data[k] = v
                 continue
 
-            if "frete" in line.lower():
+            if "frete" in line_lower:
                 nums = re.findall(r"[\d\.,]+", line)
                 if nums:
-                    frete = d(nums[-1])
+                    data["frete"] = d(nums[-1])
                 continue
 
-            if "valor negociado" in line.lower():
+            if "valor negociado" in line_lower:
                 nums = re.findall(r"[\d\.,]+", line)
                 if nums:
-                    valor_negociado = d(nums[-1])
+                    data["valor_negociado"] = d(nums[-1])
                 continue
 
-            if "prazo de entrega" in line.lower():
-                prazo_entrega = re.split(r":", line, maxsplit=1)[-1].strip()
+            if "prazo de entrega" in line_lower:
+                data["prazo_entrega"] = strip_known_label(line) or None
                 continue
 
-            if "número da cotação" in line.lower() or "numero da cotação" in line.lower() or "numero da cotacao" in line.lower():
-                numero_cotacao = re.split(r":", line, maxsplit=1)[-1].strip() if ":" in line else line
+            if (
+                "número da cotação" in line_lower
+                or "numero da cotação" in line_lower
+                or "numero da cotacao" in line_lower
+            ):
+                data["numero_cotacao"] = strip_known_label(line) or None
                 continue
 
-            obs.append(line)
+            customer_info = classify_customer_line(line)
+            if customer_info:
+                if customer_info.get("cliente_nome") and not data["cliente_nome"]:
+                    data["cliente_nome"] = customer_info["cliente_nome"]
 
-        return {
-            "cliente_nome": cliente_nome,
-            "cliente_doc": cnpj,
-            "cliente_endereco_entrega": entrega,
-            "frete": frete,
-            "valor_negociado": valor_negociado,
-            "prazo_entrega": prazo_entrega,
-            "numero_cotacao": numero_cotacao,
-            "items": items,
-            "observacoes_adicionais": obs,
-            "texto_original": text,
-        }
+                if customer_info.get("cliente_doc") and not data["cliente_doc"]:
+                    data["cliente_doc"] = customer_info["cliente_doc"]
+                continue
+
+            data["observacoes_adicionais"].append(line)
+
+        if not data["cliente_doc"] and cnpj_extraido != "não informado":
+            data["cliente_doc"] = cnpj_extraido
+
+        if not data["cliente_nome"] and lines:
+            first_line = strip_known_label(lines[0])
+            _, first_line_clean = extract_document_from_text(first_line)
+            first_line_clean = re.sub(
+                r"\s*-\s*(cpf|cnpj)\b.*$",
+                "",
+                first_line_clean,
+                flags=re.IGNORECASE,
+            ).strip()
+            if first_line_clean and not looks_like_product_line(first_line_clean):
+                data["cliente_nome"] = normalize_spaces(first_line_clean)
+
+        data["cliente_nome"] = data["cliente_nome"] or "não informado"
+        data["cliente_doc"] = data["cliente_doc"] or "não informado"
+        data["cliente_endereco"] = data["cliente_endereco"] or "não informado"
+        data["cliente_endereco_entrega"] = data["cliente_endereco_entrega"] or "não informado"
+
+        return data
 
     def build(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         text = (payload.get("texto") or payload.get("mensagem") or "").strip()
         extracted = self.parse_text(text) if text else {}
 
         cnpj = payload.get("cliente_doc") or extracted.get("cliente_doc") or "não informado"
-        cnpj_data = self.fetch_cnpj_data(cnpj) if cnpj != "não informado" else {}
+        cnpj_data = self.fetch_cnpj_data(cnpj) if len(digits_only(cnpj)) == 14 else {}
 
-        cliente_nome = payload.get("cliente_nome") or cnpj_data.get("nome") or extracted.get("cliente_nome") or "não informado"
-        cliente_endereco = (
+        cliente_nome = (
+            payload.get("cliente_nome")
+            or cnpj_data.get("nome")
+            or extracted.get("cliente_nome")
+            or "não informado"
+        )
+        cliente_endereco = normalize_spaces(
             payload.get("cliente_endereco")
+            or extracted.get("cliente_endereco")
             or cnpj_data.get("endereco")
             or "não informado"
         )
 
-        entrega = payload.get("cliente_endereco_entrega") or extracted.get("cliente_endereco_entrega") or "não informado"
+        entrega = (
+            payload.get("cliente_endereco_entrega")
+            or extracted.get("cliente_endereco_entrega")
+            or "não informado"
+        )
         frete = d(payload.get("frete") or extracted.get("frete") or "0")
         valor_negociado = payload.get("valor_negociado")
         if valor_negociado is None:
@@ -318,11 +531,17 @@ class QuoteBuilder:
                 f"<strong>{sanitize_html(entrega)}</strong>"
             )
         if extracted.get("numero_cotacao"):
-            observacoes.append(f"<strong>Número da cotação:</strong> {sanitize_html(extracted['numero_cotacao'])}")
+            observacoes.append(
+                f"<strong>Número da cotação:</strong> {sanitize_html(extracted['numero_cotacao'])}"
+            )
         if extracted.get("prazo_entrega"):
-            observacoes.append(f"<strong>Prazo de entrega:</strong> {sanitize_html(extracted['prazo_entrega'])}")
+            observacoes.append(
+                f"<strong>Prazo de entrega:</strong> {sanitize_html(extracted['prazo_entrega'])}"
+            )
         for line in extracted.get("observacoes_adicionais", []):
             observacoes.append(sanitize_html(line))
+
+        doc_formatado = format_doc(cnpj)
 
         return {
             "numero_orcamento": numero_orcamento,
@@ -330,7 +549,7 @@ class QuoteBuilder:
             "validade": br_date(date.today() + timedelta(days=7)),
             "cliente": {
                 "nome": cliente_nome or "não informado",
-                "doc": format_cnpj(cnpj),
+                "doc": doc_formatado,
                 "endereco": cliente_endereco or "não informado",
                 "endereco_entrega": entrega or "não informado",
             },
