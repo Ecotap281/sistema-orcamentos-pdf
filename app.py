@@ -33,13 +33,7 @@ FORM_HTML = """
   <p>Cole o texto no estilo WhatsApp ou envie JSON para <code>POST /gerar-orcamento</code>.</p>
   <div class="card">
     <form method="post" action="/gerar-orcamento?download=1">
-      <textarea name="texto">ESPORTE CLUBE JUVENTUDE - CNPJ 78.626.066/0001-89
-108 tapumes 2,00m
-Endereço entrega: Rua Pedro Crispim Venancio, Pescaria Brava, SC
-Valor negociado R$18,20
-Frete: R$: 279,05
-Número da Cotação 3339818 (Mengue transportes)
-Prazo de entrega: 5 Dias úteis após pagamento</textarea>
+      <textarea name="texto" placeholder="Cole aqui o texto do orçamento..."></textarea>
       <div style="margin-top:16px;">
         <button type="submit">Gerar PDF</button>
       </div>
